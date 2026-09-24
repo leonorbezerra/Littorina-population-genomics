@@ -1,0 +1,639 @@
+library(data.table)
+library(ggplot2)  
+library(readxl)   
+library(stringr)  
+library(adegenet) 
+library(plotly)   
+library(SeqArray) 
+library(SNPRelate)
+library(vcfR)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(patchwork)
+library(qqman)
+#=====================================================================
+#                               LD HEATMAPS
+#=====================================================================
+
+#chromosome.vcf.gz is a vcf with only information from the chromosome of interest
+system("plink --vcf chromosome.vcf.gz --double-id -allow-extra-chr --make-bed --out LD_temp")
+system("plink --bfile LD_temp --r2 --ld-window-kb 60000 --ld-window 99999 --maf 0.07 --out output_ld --allow-extra-chr")
+ld_data <- fread("output_ld.ld")
+
+ggplot(ld_data, aes(x=BP_A/1e6, y=BP_B/1e6)) +
+  stat_summary_2d(aes(z = R2), bins = 300, fun = mean)+
+  scale_fill_gradientn(colors = c("blue", "yellow", "red"), limits = c(0, 1), name = "r2 Value") +
+  theme_minimal() +
+  labs(title = "LD heatmap", x = "SNP A position (Mb)", y = "SNP B position (Mb)") +
+  theme(plot.title = element_text(size = 20, face = "bold", hjust = 0.5)) 
+
+
+#Calculate the average r2 inside and outside the inversion. Note:Adjust chromosome name and positions accordingly
+chr_inv   <- "ENA|OZ249416|OZ249416.1" 
+start_inv <- 42000000
+end_inv   <- 51200000
+
+average_inside <- ld_data[
+  CHR_A == chr_inv & BP_A >= start_inv & BP_A <= end_inv & CHR_B == chr_inv & BP_B >= start_inv & BP_B <= end_inv, 
+  mean(R2, na.rm = TRUE)
+]
+average_outside <- ld_data[
+  CHR_A == chr_inv & (BP_A < start_inv | BP_A > end_inv) & CHR_B == chr_inv & (BP_B < start_inv | BP_B > end_inv), 
+  mean(R2, na.rm = TRUE)
+]
+
+cat("LD average (R²) INSIDE:", round(average_inside, 4), "\n")
+cat("LD average (R²) OUTSIDE:  ", round(average_outside, 4), "\n")
+
+
+
+
+#=====================================================================
+#                               Regional PCAs
+#=====================================================================
+
+
+#IN LINUX
+
+#Extract the names contained in the .vcf to a .txt file
+bcftools query -l input.vcf.gz > sample_names.txt
+#Create a snp matrix with the information in the vcf file without the header
+bcftools query input.vcf.gz -f '%CHROM\t%POS[\t%GT]\n' > snp_matrix.txt
+
+#IN R
+
+data <- fread("snp_matrix.txt")
+raw_sample_names <- fread("sample_names.txt")
+
+cols <- names(data)[sapply(data, is.character)]
+data[, (cols) := lapply(.SD, function(x) gsub("\\|", "/", x)), .SDcols = cols]
+
+#Adjust the beginind and end positions
+inicio_inv <- 38000000
+fim_inv <- 50000000
+
+convert_genotype <- function(x) {
+  x[x == "0/0"] <- 0
+  x[x == "0/1" | x == "1/0"] <- 1
+  x[x == "1/1"] <- 2
+  return(as.numeric(x))
+}
+
+#An excel file containing a column with the sample name (must be the same names
+#contained in the vcf), another column with the colour, and another with the ecotype
+meta <- read_excel("samples.xlsx")
+colour <- meta$Colour[sapply(raw_sample_names[[1]], function(x) which(str_detect(x, stringr::fixed(meta$Individual)))[1])]
+
+data_inv <- data[V2 >= inicio_inv & V2 <= fim_inv,]
+loci_inv <- data_inv[, 1:2]
+colnames(loci_inv) <- c("chromosome", "position")
+snp_matrix_inv <- t(data_inv[, 3:ncol(data_inv)])
+row.names(snp_matrix_inv) <- raw_sample_names[[1]]
+
+snp_matrix_num_inv <- apply(snp_matrix_inv, 2, convert_genotype)
+row.names(snp_matrix_num_inv) <- raw_sample_names[[1]]
+snp_matrix_num_inv[is.na(snp_matrix_num_inv)] <- "."
+
+snp_inv <- new("genlight",
+               snp_matrix_num_inv,
+               chromosome = loci_inv$chromosome,
+               position = loci_inv$position,
+               pop = as.factor(colour))
+
+pca_inv <- glPca(snp_inv, nf = 2)
+
+total_variance <- sum(pca_inv$eig)
+
+variance <- (pca_inv$eig / total_variance) * 100
+head(variance, 4)
+
+variance_PC1 <- paste("PCA 1:", round(variance[1], 2), "%")
+variance_PC2 <- paste("PCA 2:", round(variance[2], 2), "%")
+
+ecotype <- meta$"Ecotype"[meta$Individual]
+pca <- as.data.frame(pca_inv$scores)
+colnames(pca) <- c("PC1", "PC2")
+pca$colour <- colour
+pca$ecotype= ecotype
+
+
+plot_ly(
+  data = pca, x = ~PC1, y = ~PC2, type = 'scatter', mode = 'markers', 
+  color = ~pca$ecotype, symbol = ~pca$ecotype, colors = colour, text = ~row.names(pca), hoverinfo = 'text',
+  marker = list(size = 8, color = ~I(pca$colour))
+) %>%
+  layout(
+    title = list(
+      text = "PCA inside the inversion",
+      font = list(size = 18)),
+    xaxis = list(
+      title = list(text = variance_PC1, font = list(size = 16)),  tickfont = list(size = 14)),
+    yaxis = list(
+      title = list(text = variance_PC2, font = list(size = 16)),tickfont = list(size = 14)),
+    showlegend = TRUE,
+    legend = list(
+      title = list(font = list(size = 10)),
+      font = list(size = 16)))
+
+
+
+#=====================================================================
+#            Window-based PCAs + individual heterozygocity
+#=====================================================================
+
+
+#vcf containing only the chromosome of interest
+name_vcf = "chromosome11.vcf.gz"
+# change the name to gds, normally something like [NAME_VCF].vcf
+name_gds = "chr11"
+
+if (file.exists(name_gds)==F){
+  seqVCF2GDS(name_vcf,
+             name_gds)
+}
+
+window = 1500000
+genofile <- seqOpen("chr")
+
+raw_sample_names <- fread("sample_names.txt")
+names <- raw_sample_names[[1]]
+individuals = seqGetData(genofile,"sample.id")
+meta <- read_excel("samples.xlsx")
+colour <- meta$"Colour"[meta$Individual]
+sample_set = as.data.frame(individuals)
+sample_set$COR <- colour
+
+data_pca=data.frame(START = c(NA),
+                    END = c(NA),
+                    INDIV=c(NA),
+                    PC1=c(NA),
+                    PC2=c(NA),
+                    PC3=c(NA),
+                    PC4=c(NA))
+
+varprop = data.frame(START = c(NA),
+                     END = c(NA),
+                     VARPC1 = c(NA),
+                     VARPC2 = c(NA),
+                     VARPC3 = c(NA),
+                     VARPC4 = c(NA),
+                     NBRE_SNPS = c(NA))
+
+SNP_window = vector('list',length(seq(window,tail(seqGetData(genofile,"position"),1),by=window)))
+aa = 0
+maf_stat = c(0.1)
+
+for (ee in seq(window,tail(seqGetData(genofile,"position"),1),by=window)){
+  aa = aa +1 
+  snp_filter_pass_min = which(seqGetData(genofile,"position")<=ee)
+  snp_filter_pass_max = which(seqGetData(genofile,"position")>=(ee-window))
+  SNP_window[[aa]]  = intersect(snp_filter_pass_min,snp_filter_pass_max)
+}
+
+aa = 0
+
+#polarize the PCA with one reference indivual
+reference_individual <- "individual"
+idx_ref <- which(individuals == reference_individual)
+
+
+for (ee in seq(window,tail(seqGetData(genofile,"position"),1),by=window)){
+  
+  aa = aa + 1
+  pca_noprune=vector('list',length(maf_stat))
+  names(pca_noprune)=paste("maf",maf_stat,sep="")
+  
+  if (length(SNP_window[[aa]])>0){
+    pca <- snpgdsPCA(genofile, 
+                     num.thread=1,
+                     snp.id = SNP_window[[aa]],
+                     autosome.only = FALSE,
+                     maf=0.07,
+                     missing.rate = 0.15)
+    
+    pc1_scores <- pca$eigenvect[, 1]
+    pc2_scores <- pca$eigenvect[, 2]
+    
+    if (pc1_scores[idx_ref] < 0) {
+      pc1_scores <- pc1_scores * -1
+    }
+    
+    data_pca=rbind(data_pca,
+                   data.frame(START = ee - window,
+                              END = ee,
+                              INDIV=individuals,
+                              PC1 = pc1_scores,
+                              PC2 = pc2_scores,
+                              PC3=pca$eigenvect[,3],
+                              PC4=pca$eigenvect[,4]))
+    
+    varprop = rbind(varprop,
+                    data.frame(START = ee - window,
+                               END = ee,
+                               VARPC1 = pca$varprop[1],
+                               VARPC2 = pca$varprop[2],
+                               VARPC3 = pca$varprop[3],
+                               VARPC4 = pca$varprop[4],
+                               NBRE_SNPS = length(pca[[2]])))
+    
+  }
+}
+
+
+data_pca = data_pca[-1,]
+varprop = varprop[-1,]
+
+
+data_pca$START <- as.numeric(as.character(data_pca$START))
+data_pca$PC1   <- as.numeric(as.character(data_pca$PC1))
+data_pca       <- data_pca[order(data_pca$INDIV, data_pca$START), ]
+
+data_pca <- na.omit(data_pca)
+data_pca <- merge(data_pca, sample_set[, c("names", "COLOUR")], 
+                  by.x = "INDIV", by.y = "names", all.x = TRUE)
+
+
+ggplot(data_pca, aes(x = START, y = PC1, group = INDIV, color = COLOUR)) +
+  geom_line(alpha = 0.3) + 
+  scale_color_identity() +
+  theme_bw() +
+  theme(legend.position = "none",
+        legend.title = element_text(size = 10), 
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.4, "cm") ) +
+  scale_x_continuous(labels = function(x) paste0(x / 1e6, "Mb")) +
+  labs(x = "Genomic position (Mb)", 
+       y = "PC1 Score", 
+       title = "PCA by windows")
+
+
+#-------------individual heterozygosity
+
+seqClose(genofile)
+showfile.gds(closeall=TRUE)
+genofile <- seqOpen("chr")
+sample_ids <- seqGetData(genofile, "sample.id")
+sample_ids <- gsub(".*/", "", sample_ids)
+chroms <- seqGetData(genofile, "chromosome")
+target_chr <- chroms[1]
+
+all_positions <- seqGetData(genofile, "position")
+all_chroms <- seqGetData(genofile, "chromosome")
+
+#ajust begining and end
+start_pos <- 37000000
+end_pos <- 51200000
+filter <- (all_chroms == target_chr & all_positions >= start_pos & all_positions <= end_pos)
+seqSetFilter(genofile, variant.sel = filter)
+n_snps <- sum(seqGetFilter(genofile)$variant.sel)
+
+if (n_snps > 0) {
+  geno <- seqGetData(genofile, "genotype")
+  dim_geno <- dim(geno)
+  
+  if (dim_geno[2] == n_snps) {
+    is_het <- (geno[1,,] != geno[2,,])
+    het_val <- colMeans(is_het, na.rm = TRUE)
+  } else if (dim_geno[3] == n_snps) {
+    is_het <- (geno[1,,] != geno[2,,])
+    het_val <- rowMeans(is_het, na.rm = TRUE)
+  } else {
+    stop("Stop.Error")
+  }
+  
+  samples <- seqGetData(genofile, "sample.id")
+  samples <- gsub(".*/", "", samples)
+ 
+  data_het <- data.frame(
+    INDIV = samples,
+    HET = het_val,
+    stringsAsFactors = FALSE
+  )
+  
+}
+
+
+#=====================================================================
+#                      Heterozygosity per group
+#=====================================================================
+
+#ajust the end and start positions
+chr<- "ENA|OZ249416|OZ249416.1"
+start <- 37000000
+end <- 51200000
+path_to_vcf <- "dataset.vcf.gz"
+
+putative_homo_1 <- c("individual1", "individual2",...)
+putative_hetero <- c("individual3", "individual4",...)
+putative_homo_2 <- c("individual5", "individual6",...)
+
+read_vcf <- if (grepl("\\.gz$", path_to_vcf)) "zcat" else "cat"
+
+command <- paste0(
+  read_vcf, " ", path_to_vcf, 
+  " | awk -v chr='", chr, "' -v start=", start, " -v end=", end, 
+  " '{ if ($1 ~ /^#/ || ($1 == chr && $2 >= start && $2 <= end)) print }'"
+)
+
+temp <- tempfile(fileext = ".vcf")
+system(paste(command, ">", temp))
+vcf_het <- read.vcfR(temp)
+unlink(ficheiro_temp)
+obj_genind <- vcfR2genind(vcf_het)
+
+
+df_groups_pca <- data.frame(
+  SRR = indNames(obj_genind),
+  stringsAsFactors = FALSE
+)
+
+df_groups_pca <- df_groups_pca %>%
+  mutate(Group = case_when(
+    SRR %in% putative_homo_1 ~ "Cluster A",
+    SRR %in% putative_hetero ~ "Cluster B",
+    SRR %in% putative_homo_2 ~ "Cluster C",
+    TRUE                   ~ "NOT FOUND"
+  )
+  )
+strata(obj_genind) <- df_groups_pca
+info_genind <- summary(obj_genind)
+matrix_adegenet <- tab(obj_genind, NA.method = "asis")
+ho_obs <- rowMeans(matrix_adegenet == 1, na.rm = TRUE)
+
+df_ho <- data.frame(
+  SRR = indNames(obj_genind),
+  Ho = ho_obs,
+  stringsAsFactors = FALSE
+)
+
+final_df <- inner_join(df_ho, df_groups_pca, by = "SRR")
+
+#----------------wilcoxon
+wilcox_inv <- pairwise.wilcox.test(
+  x = final_df$Ho,      
+  g = final_df$Group,   
+  p.adjust.method = "bonferroni"
+)
+
+print(wilcox_inv)
+
+#repeat for all regions
+#=====================================================================
+#                 Divergency and nucleotide diversity
+#=====================================================================
+
+#IN LINUX
+
+vcftools --gzvcf "chromosome11.vcf.gz" \
+--keep group_AA.txt \
+--window-pi 10000 \
+--window-pi-step 10000 \
+--out group_AA
+
+#chromosome.vcf.gz is a vcf of conatining information only from the chromosome of interest
+#group_AA is a txt file containing the name of the putative homokaryotypes for the ancestral arrangement.
+#repeat this for the putative hmokaryotypes for the inversion, and for all the individuals
+
+# IN R
+
+GROUP_AA <- "Group AA"
+GROUP_BB <- "Group BB"
+
+#adjust these numbers
+NX <- 4  # n_x
+NY <- 3  # n_y
+NT <- NX + NY  # N total
+
+
+x_pi <- read_tsv("groupAA.windowed.pi") %>% select(CHROM, BIN_START, pi_x = PI)
+y_pi <- read_tsv("groupBB.windowed.pi") %>% select(CHROM, BIN_START, pi_y = PI)
+t_pi <- read_tsv("total.windowed.pi") %>% select(CHROM, BIN_START, pi_t = PI)
+
+
+data_pi <- inner_join(x_pi, y_pi, by = c("CHROM", "BIN_START")) %>%
+  inner_join(t_pi, by = c("CHROM", "BIN_START")) %>%
+  mutate(
+    # Aplicação exata da fórmula matemática isolada para dxy
+    dxy = (NT*(NT-1)*pi_t - NX*(NX-1)*pi_x - NY*(NY-1)*pi_y) / (2 * NX * NY),
+    
+    dxy = if_else(dxy < 0, 0, dxy),
+    
+    # Conversão para Mb para os eixos do gráfico
+    pos = BIN_START / 1e6,
+    region = if_else(pos >= 37 & pos <= 52, "Inv", "Col")
+  )
+
+# Cria a tabela longa para o GRÁFICO 1
+pi <- data_pi %>%
+  select(CHROM, BIN_START, region, !!GROUP_AA := pi_x, !!GROUP_BB := pi_y) %>%
+  pivot_longer(cols = c(!!sym(GROUP_AA), !!sym(GROUP_BB)), names_to = "group", values_to = "pi")
+
+
+
+# ---- WILCOXON TESTS +  BONFERRONI (HOLM) ----
+
+wilcox_inv <- data_pi %>% filter(region == "Inv")
+wilcox_col   <- data_pi %>% filter(region == "Col")
+
+p_values <- c(
+  t1 = wilcox.test(pi_x ~ region, data = data_pi)$p.value,
+  t2 = wilcox.test(pi_y ~ region, data = data_pi)$p.value,
+  t3 = wilcox.test(dxy ~ region, data = data_pi)$p.value,
+  t4 = wilcox.test(wilcox_inv$pi_x, wilcox_inv$pi_y, paired = TRUE)$p.value,
+  t5 = wilcox.test(wilcox_col$pi_x, wilcox_col$pi_y, paired = TRUE)$p.value
+)
+p_corrected <- p.adjust(p_values, method = "holm")
+
+tests <- c(
+  "1. Pi Group AA — Inv) vs Col",
+  "2. Pi Group BB — Inv) vs Col",
+  "3. dXY — Inv vs Col",
+  "4. Inv — Group AA vs Group BB",
+  "5. Col — Group AA vs Group BB"
+)
+
+sink("wilcoxon_tests_pi.txt")
+
+for(i in 1:length(p_values)) {
+  cat(tests[i], "\n")
+  cat("  -> P-value:     ", format.pval(p_values[i], digits = 5), "\n")
+  cat("  -> P-value Corrected: ", format.pval(p_corrected[i], digits = 5), "\n")
+  if(p_corrected[i] < 0.05) {
+    cat("  -> Result:          Significative (p < 0.05)\n")
+  } else {
+    cat("  -> Result:          Not Significative (p >= 0.05)\n")
+  }
+  cat("\n-------------------------------\n\n")
+}
+sink()
+
+
+# ---- GRAPH 1: Pi boxplot (Inv vs Col) ----
+box_pi <- ggplot(pi, aes(x = region, y = pi, fill = region)) +
+  geom_boxplot(outlier.alpha = 0.3, width = 0.5) + 
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white", color = "black") +
+  facet_wrap(~group) +
+  scale_fill_manual(values = c("Col" = "#377eb8", "Inv" = "#e41a1c")) +
+  labs(title = "Nucleotide diversity per window: Inv vs Col",
+       x = NULL, y = expression(pi)) + 
+  theme_bw() + theme(legend.position = "none")
+
+print(box_pi)
+ggsave("boxplot_pi.png", box_pi, width = 7, height = 4)
+
+# ---- GRAPH 2: dXY boxplot (Inv vs Col) ----
+box_dxy <- ggplot(data_pi, aes(x = region, y = dxy, fill = region)) +
+  geom_boxplot(outlier.alpha = 0.3, width = 0.5) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, fill = "white", color = "black") +
+  scale_fill_manual(values = c("Col" = "#377eb8", "Inv" = "#e41a1c")) +
+  labs(title = expression(paste(d[xy], "dxy per window: Inv vs. Col")),
+       x = NULL, y = expression(d[xy])) + 
+  theme_bw() + theme(legend.position = "none")
+
+print(box_dxy)
+ggsave("boxplot d_xy.png", box_dxy, width = 5, height = 4)
+
+# ---- GRÁFICO 3: dXY ao longo do Cromossoma (Com Linha de Tendência) ----
+plot_dxy_chr <- ggplot(data_pi, aes(x = pos, y = dxy)) +
+  geom_point(aes(color = region), alpha = 0.5, size = 1.2) +
+  geom_smooth(method = "loess", span = 0.2, color = "black", linewidth = 1, se = FALSE) +
+  geom_vline(xintercept = c(37, 51.5), linetype = "dashed", color = "gray30", alpha = 0.8) +
+  scale_color_manual(values = c("Col" = "#377eb8", "Inv" = "#e41a1c")) +
+  labs(title = expression(paste(d[xy], "dxy across chromosome 11")),
+       x = "Position (Mb)", y = expression(d[xy]), color = "Region") + 
+  theme_bw() + theme(legend.position = "bottom")
+
+print(plot_dxy_chr)
+ggsave("dxy chromosome.png", plot_dxy_chr, width = 10, height = 5)
+
+# ---- GRAPH 4: Panel of  Pi across the chromosome ----
+pi_x_plot <- ggplot(data_pi, aes(x = pos, y = pi_x)) +
+  geom_point(aes(color = region), alpha = 0.5, size = 1.2) +
+  geom_smooth(method = "loess", span = 0.2, color = "black", linewidth = 1, se = FALSE) +
+  geom_vline(xintercept = c(37, 51.5), linetype = "dashed", color = "gray30", alpha = 0.8) +
+  scale_color_manual(values = c("Col" = "#377eb8", "Inv" = "#e41a1c")) +
+  labs(title = paste0("Nucleotide diversity across chromosome 11", GROUP_AA),
+       x = NULL, y = expression(pi)) + 
+  theme_bw() + theme(legend.position = "none")
+
+pi_y_plot <- ggplot(data_pi, aes(x = pos, y = pi_y)) +
+  geom_point(aes(color = region), alpha = 0.5, size = 1.2) +
+  geom_smooth(method = "loess", span = 0.2, color = "black", linewidth = 1, se = FALSE) +
+  geom_vline(xintercept = c(37, 51.5), linetype = "dashed", color = "gray30", alpha = 0.8) +
+  scale_color_manual(values = c("Col" = "#377eb8", "Inv" = "#e41a1c")) +
+  labs(title = paste0("Nucleotide diversity across chromosome 11", GROUP_BB),
+       x = "Position (Mb)", y = expression(pi), color = "Region") + 
+  theme_bw() + theme(legend.position = "none")
+
+panel_pi <- pi_x_plot / pi_y_plot
+
+print(panel_pi)
+ggsave("pi across chromosome 11.png", panel_pi, width = 10, height = 8)
+
+
+#=====================================================================
+#                         Association studies
+#=====================================================================
+
+system("~/plink --vcf input.vcf.gz --double-id --allow-extra-chr --chr-set 30 --extract file.prune.in --pca 10 --out global_pca")
+system("~/plink --vcf input.vcf.gz --double-id --allow-extra-chr --chr-set 30 --maf 0.05 --geno 0.05 --hwe 0.0001 --make-bed --out data_gemma")
+
+
+fam <- fread("~/data_gemma.fam")
+colnames(fam)[1:2] <- c("FID", "ID")
+pca_data <- fread("global_pca.eigenvec")
+setnames(pca_data, old = c("V2", "V3", "V4"), new = c("ID", "PC1", "PC2"))
+#an excel with the samples and the phenotype associated
+fenotype <- read.csv("excel.csv", sep = ";", stringsAsFactors = FALSE)
+feno <- as.data.table(fenotype)
+feno[, colour := trimws(tolower(Colour))]
+feno <- feno[colour %in% c("yellow", "brown")]
+feno$colour <- factor(feno$colour)
+
+
+complete_data <- merge(pca_data[, .(ID, PC1, PC2)], feno, by = "ID", all.y = TRUE)
+gemma_data <- merge(fam[, .(FID, ID)], complete_data by = "ID", all.x = TRUE, sort = FALSE)
+gemma_data[, Feno_Num := ifelse(colour == "yellow", 1, ifelse(colour == "brown", 2, -9))]
+gemma_data[is.na(Feno_Num), Feno_Num := -9]
+
+
+write.table(data_gemma[, .(Feno_Num)],
+            file = "~/my_phenotype.txt",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(data_gemma[, .(PC1, PC2)],
+            file = "~/gemma_cov.txt",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+
+
+#IN LINUX
+
+#indiv.txt is a .txt containing the individuals to be manteined in the analysis
+bcftools query -S indiv.txt -f '%CHROM:%POS %REF %ALT[\t%GT]\n' input.vcf.gz | awk '{printf "%s %s %s", $1, $2, $3; for(i=4;i<=NF;i++) {if($i=="0/0" || $i=="0|0") printf " 0"; else if($i=="0/1" || $i=="1/0" || $i=="0|1" || $i=="1|0") printf " 1"; else if($i=="1/1" || $i=="1|1") printf " 2"; else printf " NA"}; printf "\n"}' > data_bimbam.txt
+sed -i 's/,/ /g' data_bimbam.txt
+
+#Input is a vcf of the whole genome
+bcftools query -f '%CHROM:%POS %POS %CHROM\n' input.vcf.gz > pos_bimbam.pos.txt
+./gemma -g data_bimbam.txt -p ~/my_phenotype.txt -gk 1 -miss 0.05 -maf 0.01 -o matrix_gwas
+./gemma -g data_bimbam.txt -c ~/gemma_cov.txt -p ~/my_phenotype.txt -a pos_bimbam.pos.txt -k output/matrix_gwas.cXX.txt -lmm 1 -miss 0.05 -maf 0.01 -o final_gwas
+
+#data_bimbam.txt, my_phenotype.txt and gemma_cov.txt must have the individuals in the same order
+
+#IN R
+
+data <- read.table("~/output/final_gwas.assoc.txt", header=TRUE, stringsAsFactors=FALSE)
+data$chr_num <- as.numeric(as.factor(data$chr))
+
+man_data <- data.frame(
+  SNP = dados$rs,
+  CHR = dados$chr_num,
+  BP = dados$ps,
+  P = dados$p_wald
+)
+
+man_data$CHR <- as.numeric(as.character(man_data$CHR))
+man_data$BP  <- as.numeric(as.character(man_data$BP))
+man_data <- subset(man_data, BP >= 0 & !is.na(BP))
+chr_names <- as.character(1:17) 
+man_data <- man_data[!is.na(man_data$P) & is.finite(man_data$P), ]
+
+manhattan(
+  man_data, 
+  col = c("#3fa15c", "#f74f66"), 
+  main = "GWAS across the genome",
+  genomewideline = limiar_genomewide <- -log10(0.05 / nrow(man_data)),
+  chrlabs = chr_names
+)
+
+p_values <- dados$p_wald
+p_values <- p_values[!is.na(p_values)]
+chi2 <- qchisq(1 - p_values, df = 1)
+lambda <- median(chi2, na.rm = TRUE) / qchisq(0.5, df = 1)
+cat("Genomic inflation lambda:", lambda, "\n")
+observed_log <- -log10(sort(p_values))
+expected_log <- -log10(ppoints(length(p_values)))
+plot(expected_log, observed_log,
+     main = paste("Gemma QQ-Plot, lambda=", round(lambda, 2), ")"),
+     xlab = "Waited (-log10 p)",
+     ylab = "Observed (-log10 p)",
+     pch = 20, col = "darkblue")
+abline(0, 1, col = "red", lwd = 2)
+
+
+relevant_snps <- man_data[order(man_data$P), ]
+
+top_20_snps <- head(relevant_snps, 200)
+print(top_20_snps)
+
+
+#=====================================================================
+#                         Phylogenetic trees
+#=====================================================================
+
+#data.fas is a fasta file containing the sequences of all samples aligned including the sequence of the outgroup
+#ML tree
+.\iqtree3.exe -m MFP -mset JC,K80,HKY,GTR -mrate E,I,G,I+G -T 4 -B 1000 -st DNA -s data.fas
+#NJ tree. The model here used was the model IQ-TREE found in the previous script. Adapt.
+.\iqtree3.exe -s data.fas -st DNA -m GTR+F+I+G4 -t BIONJ -n 0 -T 4 -pre NJ_tree
+
