@@ -341,7 +341,6 @@ vcf_het <- read.vcfR(temp)
 unlink(ficheiro_temp)
 obj_genind <- vcfR2genind(vcf_het)
 
-
 df_groups_pca <- data.frame(
   SRR = indNames(obj_genind),
   stringsAsFactors = FALSE
@@ -404,7 +403,6 @@ NX <- 4  # n_x
 NY <- 3  # n_y
 NT <- NX + NY
 
-
 x_pi <- read_tsv("groupAA.windowed.pi") %>% select(CHROM, BIN_START, pi_x = PI)
 y_pi <- read_tsv("groupBB.windowed.pi") %>% select(CHROM, BIN_START, pi_y = PI)
 t_pi <- read_tsv("total.windowed.pi") %>% select(CHROM, BIN_START, pi_t = PI)
@@ -412,15 +410,12 @@ t_pi <- read_tsv("total.windowed.pi") %>% select(CHROM, BIN_START, pi_t = PI)
 data_pi <- inner_join(x_pi, y_pi, by = c("CHROM", "BIN_START")) %>%
   inner_join(t_pi, by = c("CHROM", "BIN_START")) %>%
   mutate(
-    # Aplicação exata da fórmula matemática isolada para dxy
     dxy = (NT*(NT-1)*pi_t - NX*(NX-1)*pi_x - NY*(NY-1)*pi_y) / (2 * NX * NY),
         
-    # Conversão para Mb para os eixos do gráfico
     pos = BIN_START / 1e6,
     region = if_else(pos >= 37 & pos <= 52, "Inv", "Col")
   )
 
-# Cria a tabela longa para o GRÁFICO 1
 pi <- data_pi %>%
   select(CHROM, BIN_START, region, !!GROUP_AA := pi_x, !!GROUP_BB := pi_y) %>%
   pivot_longer(cols = c(!!sym(GROUP_AA), !!sym(GROUP_BB)), names_to = "group", values_to = "pi")
@@ -540,6 +535,7 @@ fam <- fread("~/out_gemma.fam")
 colnames(fam)[1:2] <- c("FID", "ID")
 pca_data <- fread("global_pca.eigenvec")
 setnames(pca_data, old = c("V2", "V3", "V4"), new = c("ID", "PC1", "PC2"))
+
 #an excel with the samples and the phenotype associated
 fenotype <- read.csv("excel.csv", sep = ";", stringsAsFactors = FALSE)
 feno <- as.data.table(fenotype)
