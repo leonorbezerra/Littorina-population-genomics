@@ -146,7 +146,7 @@ plot_ly(
 #vcf containing only the chromosome of interest
 name_vcf = "chromosome11.vcf.gz"
 # change the name to gds, normally something like [NAME_VCF].vcf
-name_gds = "chr11"
+name_gds = "chr"
 
 if (file.exists(name_gds)==F){
   seqVCF2GDS(name_vcf,
