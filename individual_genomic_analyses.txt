@@ -83,7 +83,7 @@ convert_genotype <- function(x) {
 #An excel file containing a column with the sample name (must be the same names
 #contained in the vcf), another column with the colour, and another with the ecotype
 meta <- read_excel("samples.xlsx")
-colour <- meta$Colour[sapply(raw_sample_names[[1]], function(x) which(str_detect(x, stringr::fixed(meta$Individual)))[1])]
+colour <- meta$Colour[sapply(raw_sample_names[[1]], function(x) which(str_detect(x,stringr::fixed(meta$Individual)))[1])]
 
 data_inv <- data[V2 >= inicio_inv & V2 <= fim_inv,]
 loci_inv <- data_inv[, 1:2]
@@ -93,7 +93,6 @@ row.names(snp_matrix_inv) <- raw_sample_names[[1]]
 
 snp_matrix_num_inv <- apply(snp_matrix_inv, 2, convert_genotype)
 row.names(snp_matrix_num_inv) <- raw_sample_names[[1]]
-snp_matrix_num_inv[is.na(snp_matrix_num_inv)] <- "."
 
 snp_inv <- new("genlight",
                snp_matrix_num_inv,
@@ -393,7 +392,7 @@ vcftools --gzvcf "chromosome11.vcf.gz" \
 
 #chromosome.vcf.gz is a vcf of conatining information only from the chromosome of interest
 #group_AA is a txt file containing the name of the putative homokaryotypes for the ancestral arrangement.
-#repeat this for the putative hmokaryotypes for the inversion, and for all the individuals
+#repeat this for the putative homokaryotypes for the inversion, and for a group containing both homokaryotypes
 
 # IN R
 
@@ -403,22 +402,19 @@ GROUP_BB <- "Group BB"
 #adjust these numbers
 NX <- 4  # n_x
 NY <- 3  # n_y
-NT <- NX + NY  # N total
+NT <- NX + NY
 
 
 x_pi <- read_tsv("groupAA.windowed.pi") %>% select(CHROM, BIN_START, pi_x = PI)
 y_pi <- read_tsv("groupBB.windowed.pi") %>% select(CHROM, BIN_START, pi_y = PI)
 t_pi <- read_tsv("total.windowed.pi") %>% select(CHROM, BIN_START, pi_t = PI)
 
-
 data_pi <- inner_join(x_pi, y_pi, by = c("CHROM", "BIN_START")) %>%
   inner_join(t_pi, by = c("CHROM", "BIN_START")) %>%
   mutate(
     # Aplicação exata da fórmula matemática isolada para dxy
     dxy = (NT*(NT-1)*pi_t - NX*(NX-1)*pi_x - NY*(NY-1)*pi_y) / (2 * NX * NY),
-    
-    dxy = if_else(dxy < 0, 0, dxy),
-    
+        
     # Conversão para Mb para os eixos do gráfico
     pos = BIN_START / 1e6,
     region = if_else(pos >= 37 & pos <= 52, "Inv", "Col")
@@ -537,10 +533,10 @@ ggsave("pi across chromosome 11.png", panel_pi, width = 10, height = 8)
 #=====================================================================
 
 system("~/plink --vcf input.vcf.gz --double-id --allow-extra-chr --chr-set 30 --extract file.prune.in --pca 10 --out global_pca")
-system("~/plink --vcf input.vcf.gz --double-id --allow-extra-chr --chr-set 30 --maf 0.05 --geno 0.05 --hwe 0.0001 --make-bed --out data_gemma")
+system("~/plink --vcf input.vcf.gz --double-id --allow-extra-chr --chr-set 30 --maf 0.05 --geno 0.05 --hwe 0.0001 --make-bed --out out_gemma")
 
 
-fam <- fread("~/data_gemma.fam")
+fam <- fread("~/out_gemma.fam")
 colnames(fam)[1:2] <- c("FID", "ID")
 pca_data <- fread("global_pca.eigenvec")
 setnames(pca_data, old = c("V2", "V3", "V4"), new = c("ID", "PC1", "PC2"))
@@ -558,10 +554,10 @@ gemma_data[, Feno_Num := ifelse(colour == "yellow", 1, ifelse(colour == "brown",
 gemma_data[is.na(Feno_Num), Feno_Num := -9]
 
 
-write.table(data_gemma[, .(Feno_Num)],
+write.table(gemma_data[, .(Feno_Num)],
             file = "~/my_phenotype.txt",
             row.names = FALSE, col.names = FALSE, quote = FALSE)
-write.table(data_gemma[, .(PC1, PC2)],
+write.table(gemma_data[, .(PC1, PC2)],
             file = "~/gemma_cov.txt",
             row.names = FALSE, col.names = FALSE, quote = FALSE)
 
@@ -586,10 +582,10 @@ data <- read.table("~/output/final_gwas.assoc.txt", header=TRUE, stringsAsFactor
 data$chr_num <- as.numeric(as.factor(data$chr))
 
 man_data <- data.frame(
-  SNP = dados$rs,
-  CHR = dados$chr_num,
-  BP = dados$ps,
-  P = dados$p_wald
+  SNP = dadta$rs,
+  CHR = data$chr_num,
+  BP = data$ps,
+  P = data$p_wald
 )
 
 man_data$CHR <- as.numeric(as.character(man_data$CHR))
@@ -606,7 +602,7 @@ manhattan(
   chrlabs = chr_names
 )
 
-p_values <- dados$p_wald
+p_values <- data$p_wald
 p_values <- p_values[!is.na(p_values)]
 chi2 <- qchisq(1 - p_values, df = 1)
 lambda <- median(chi2, na.rm = TRUE) / qchisq(0.5, df = 1)
