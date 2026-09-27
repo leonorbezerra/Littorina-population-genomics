@@ -625,7 +625,8 @@ print(top_20_snps)
 
 #data.fas is a fasta file containing the sequences of all samples aligned including the sequence of the outgroup
 #ML tree
-.\iqtree3.exe -m MFP -mset JC,K80,HKY,GTR -mrate E,I,G,I+G -T 4 -B 1000 -st DNA -s data.fas
+#ASC is the correction for alignments containing only variant sites
+.\iqtree3.exe -m MFP+ASC -mset JC,K80,HKY,GTR -T 4 -B 1000 -st DNA -s data.fas
 #NJ tree. The model here used was the model IQ-TREE found in the previous script. Adapt.
-.\iqtree3.exe -s data.fas -st DNA -m GTR+F+I+G4 -t BIONJ -n 0 -T 4 -pre NJ_tree
+.\iqtree3.exe -s data.fas -st DNA -m GTR+ASC+R2 -t BIONJ -n 0 -T 4 -pre NJ_tree
 
