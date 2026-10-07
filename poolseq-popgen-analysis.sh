@@ -13,7 +13,7 @@ samtools depth -aa pool_nodup.bam | awk '{sum+=$3; cnt++} END {if (cnt > 0) prin
 
 ### Preparing data for popoolation1 ###
 #Note: This step will create one pileup file for the respective pool
-samtools mpileup -B -f -aa path/to/reference.fasta -Q30 -q30 pool_nodup.bam | grep -v mpileup | awk '$4 >9' > file_per_pool.pileup
+samtools mpileup -B -aa -f path/to/reference.fasta -Q30 -q30 pool_nodup.bam | grep -v mpileup | awk '$4 >9' > file_per_pool.pileup
 
 ### Calculate pi and Tajima’s D (popoolation1) ###
 #Note: adjust the maximum coverage (2.5x the average coverage) and pool size (2x pool size for diploid samples)
@@ -22,7 +22,7 @@ perl path/to/Variance-sliding.pl --input file_per_pool.pileup --output file.D --
 
 ### Preparing data for popoolation2 ###
 #Note: This step will create one single file for both pools
-samtools mpileup -B -f -aa path/to/reference.fasta -Q30 -q30 pool1_nodup.bam pool2_nodup.bam | grep -v mpileup | awk '$4 >4 && $7 >4' > pool1_pool2.mpileup
+samtools mpileup -B -aa -f path/to/reference.fasta -Q30 -q30 pool1_nodup.bam pool2_nodup.bam | grep -v mpileup | awk '$4 >4 && $7 >4' > pool1_pool2.mpileup
 java -ea -Xmx7g -jar path/to/mpileup2sync.jar --input pool1_pool2.mpileup --output pool1_pool2.sync --fastq-type sanger --min-qual 30 --threads 15
 
 ### FST and Allele frequency differences (popoolation2)
