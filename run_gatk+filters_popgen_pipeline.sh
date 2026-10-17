@@ -2,7 +2,7 @@
 #all the previous steps, including adapter removal and mapping, followed the script provided in A standard pipeline for processing short-read sequencing data from Littorina snails V.3, by James Reeve et al.
 
 
-#Personally, I recomend parallelizing this to process a few chromosomes (if not all) at a time
+#This code was run using the Slurm Workload Manager. This script was paralelized to run a job per chromosome, and a job with all the small scaffolds
 
 conda activate gatk
 
@@ -15,42 +15,55 @@ LOCAL_TMP="/tmp/vcfs"
 mkdir -p "$RG_ADDED"
 mkdir -p "$LOCAL_TMP"
 
+MAP_CHRS=($(head -n 18 "$REF".fai | cut -f1))
+if [ "$SLURM_ARRAY_TASK_ID" -le 18 ]; then #For the main 17 chromosomes + mitochondrial chromosome
+    INDEX=$((SLURM_ARRAY_TASK_ID - 1))
+    CHR=${MAP_CHRS[$INDEX]}
+    GATK_REGION="$CHR"
+else
+    #For the small scaffolds
+    CHR="scaffolds"
+    GATK_REGION="$FINAL_VCF_DIR/scaffolds.list"
+    tail -n +19 "$REF".fai | cut -f1 > "$GATK_REGION"
+fi
+
+
+
 i=0
 
 for file in "$BAMS"/*_nodup.bam
 do
-echo "Procssing: $file"
+    echo "Procssing: $file"
+    sample=$(basename "$file" _nodup.bam)
+    out_RG="$RG_ADDED/${sample}_addedRG.bam"
+    out_vcf="$LOCAL_TMP/${sample}_${CHR}.g.vcf.gz"
 
-sample=$(basename "$file" _nodup.bam)
-out_RG="$RG_ADDED/${sample}_addedRG.bam"
-out_vcf="$LOCAL_TMP/${sample}_${CHR}.g.vcf.gz"
+    lib_name="LIB-${sample}-01"
+    ((i++))
+    unit_name="unit$i"
 
-lib_name="LIB-${sample}-01"
-((i++))
-unit_name="unit$i"
+    gatk AddOrReplaceReadGroups \
+     -I "$file" \
+     -O "$out_RG" \
+     -RGLB "$lib_name" \
+     -RGPL ILLUMINA \
+     -RGPU "$unit_name" \
+     -RGSM "$sample"
 
-    picard AddOrReplaceReadGroups \
-     I="$file" \
-    O="$out_RG" \
-   RGLB="$lib_name" \
-  RGPL=ILLUMINA \
- RGPU="$unit_name" \
-RGSM="$sample"
+    gatk IndexFeatureFile -I "$out_RG";
+    
+    gatk --java-options "-Xmx30g" HaplotypeCaller \
+     -R "$REF" \
+     -I "$out_RG" \
+     -O "$out_vcf" \
+     -L "$GATK_REGION" \
+     -ERC GVCF \
+     --min-base-quality-score 13 \
+     --minimum-mapping-quality 30 \
+     --mapping-quality-threshold-for-genotyping 30 \
+     --pcr-indel-model NONE
 
-    samtools index "$out_RG"
-
-gatk --java-options "-Xmx30g" HaplotypeCaller \
--R "$REF" \
--I "$out_RG" \
--O "$out_vcf" \
--L "$GATK_REGION" \
--ERC GVCF \
---min-base-quality-score 13 \
---minimum-mapping-quality 30 \
---mapping-quality-threshold-for-genotyping 30 \
---pcr-indel-model NONE
-
-mv "$LOCAL_TMP/${sample}_${CHR}.g.vcf.gz" "$FINAL_VCF_DIR/"
+    mv "$LOCAL_TMP/${sample}_${CHR}.g.vcf.gz"* "$FINAL_VCF_DIR/"
 
 done
 
@@ -58,36 +71,34 @@ echo "Calling individual done"
 
 
 for file in "$BAMS"/*_nodup.bam; do
-sample=$(basename "$file" _nodup.bam)
-
-gvcf_path="$FINAL_VCF_DIR/${sample}_${CHR}.g.vcf.gz"
-
-echo "$gvcf_path" >> "$FINAL_VCF_DIR/gvcfs_${CHR}.list"
-
-if [ ! -f "${gvcf_path}.tbi" ]; then
-gatk IndexFeatureFile -I "$gvcf_path"
-fi
+    sample=$(basename "$file" _nodup.bam)
+    gvcf_path="$FINAL_VCF_DIR/${sample}_${CHR}.g.vcf.gz"
+    
+    echo "$gvcf_path" >> "$FINAL_VCF_DIR/gvcfs_${CHR}.list"
+    
+    if [ ! -f "${gvcf_path}.tbi" ]; then
+        gatk IndexFeatureFile -I "$gvcf_path"
+    fi
 done
 
 gatk --java-options "-Xmx35g" CombineGVCFs \
--R "$REF" \
--V "$FINAL_VCF_DIR/gvcfs_${CHR}.list" \
--O "$FINAL_VCF_DIR/${CHR}.g.vcf.gz"
+ -R "$REF" \
+ -V "$FINAL_VCF_DIR/gvcfs_${CHR}.list" \
+ -O "$FINAL_VCF_DIR/${CHR}.g.vcf.gz"
 
 gatk IndexFeatureFile -I "$FINAL_VCF_DIR/${CHR}.g.vcf.gz"
 
 gatk --java-options "-Xmx35g" GenotypeGVCFs \
--R "$REF" \
--V "$FINAL_VCF_DIR/${CHR}.g.vcf.gz" \
--O "$FINAL_VCF_DIR/${CHR}.vcf.gz"
-
+ -R "$REF" \
+ -V "$FINAL_VCF_DIR/${CHR}.g.vcf.gz" \
+ -O "$FINAL_VCF_DIR/${CHR}.vcf.gz"
 
 
 gatk --java-options "-Xmx16g" GatherVcfs \
--V "path/to/cromosome1.vcf.gz" \
-...
-# add all chromosomes
--O "final_unfilt.vcf.gz"
+ -V "path/to/cromosome1.vcf.gz" \
+ ...
+ # add all chromosomes
+ -O "final_unfilt.vcf.gz"
 
 gatk IndexFeatureFile -I "final_unfilt.vcf.gz"
 
