@@ -50,7 +50,7 @@ do
      -RGPU "$unit_name" \
      -RGSM "$sample"
 
-    gatk IndexFeatureFile -I "$out_RG";
+    gatk BuildBamIndex -I "$out_RG"
     
     gatk --java-options "-Xmx30g" HaplotypeCaller \
      -R "$REF" \
